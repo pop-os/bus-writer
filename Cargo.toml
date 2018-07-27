@@ -1,0 +1,12 @@
+[package]
+name = "bus_writer"
+version = "0.1.0"
+authors = ["Michael Aaron Murphy <michael@system76.com>"]
+description = "Single-reader, multi-writer; broadcasts reads to multiple writeable destinations in parallel"
+license = "LICENSE"
+readme = "README.md"
+repository = "https://github.com/pop-os/bus_writer"
+
+[dependencies]
+bus = "2.0.0"
+crossbeam = "0.3"
