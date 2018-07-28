@@ -1,16 +1,16 @@
 extern crate bus_writer;
 
-use bus_writer::*;
+use bus_writer::{BusWriter, BusWriterMessage, BusVerifier, BusVerifierMessage};
 use std::io::{BufReader, Cursor, Read};
 use std::fs::{self, File};
-use std::process::exit;
 
-fn main() {
+#[test]
+fn eight_local_files() {
     let data: Vec<u8> = [0u8; 1024 * 1024 * 5].into_iter()
         .zip([1u8; 1024 * 1024 * 5].into_iter())
         .cycle()
-        .take(50 * 1024 * 1024)
-        .fold(Vec::with_capacity(100 * 1024 * 1024), |mut acc, (&x, &y)| {
+        .take(512 * 1024)
+        .fold(Vec::with_capacity(1 * 1024 * 1024), |mut acc, (&x, &y)| {
             acc.push(x);
             acc.push(y);
             acc
@@ -18,7 +18,7 @@ fn main() {
 
     let mut source = Cursor::new(&data);
 
-    let files = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    let files = ["/tmp/a", "/tmp/b", "/tmp/c", "/tmp/d", "/tmp/e", "/tmp/f", "/tmp/g", "/tmp/h"];
     let mut temp_files = [
         fs::OpenOptions::new().read(true).write(true).create(true).open(files[0]).unwrap(),
         fs::OpenOptions::new().read(true).write(true).create(true).open(files[1]).unwrap(),
@@ -29,40 +29,41 @@ fn main() {
         fs::OpenOptions::new().read(true).write(true).create(true).open(files[6]).unwrap(),
         fs::OpenOptions::new().read(true).write(true).create(true).open(files[7]).unwrap(),
     ];
-
-    let mut errored = false;
-    let result = BusWriter::new(
+    
+    BusWriter::new(
         &mut source,
         &mut temp_files,
         // Reports progress of each device so that callers may create their own progress bars
         // for each destination being written to, as seen in System76's Popsicle GTK UI.
         |event| match event {
             BusWriterMessage::Written { id, bytes_written } => {
-                println!("{}: {} total bytes written", files[id], bytes_written);
+                println!("{}: {} bytes written", files[id], bytes_written);
             }
             BusWriterMessage::Completed { id } => {
                 println!("{}: Completed", files[id]);
             }
             BusWriterMessage::Errored { id, why } => {
-                println!("{} errored: {}", files[id], why);
-                errored = true;
+                println!("{} errored while writing: {}", files[id], why);
+                panic!("errors should not occur when writing!");
             }
         },
         // Executed at certain points while writing to check if the process needs to be cancelled
         || false
-    ).write();
-
-    if let Err(why) = result {
-        eprintln!("writing failed: {}", why);
-        exit(1);
-    } else if errored {
-        eprintln!("an error occurred");
-        exit(1);
-    }
+    ).write().unwrap();
 
     eprintln!("finished writing; validating files");
 
-    let result = BusVerifier::new(
+    for file in &files {
+        for (a, b) in BufReader::new(File::open(file).unwrap()).bytes().zip(data.iter()) {
+            assert_eq!(a.unwrap(), *b);
+        }
+
+        let _ = fs::remove_file(file);
+    }
+
+    eprintln!("Passed. Validating with BusVerifier");
+
+    BusVerifier::new(
         source,
         &mut temp_files,
         |event| match event {
@@ -74,23 +75,15 @@ fn main() {
             }
             BusVerifierMessage::Invalid { id } => {
                 println!("{}: Invalid", id);
-                errored = true;
+                panic!("failed to validate destination!");
             }
             BusVerifierMessage::Errored { id, why } => {
                 println!("{} errored while verifying: {}", files[id], why);
-                errored = true;
+                panic!("errors should not occur when verifying!");
             }
         },
         || false
-    ).verify();
-
-    if let Err(why) = result {
-        eprintln!("writing failed: {}", why);
-        exit(1);
-    } else if errored {
-        eprintln!("Error occurred");
-        exit(1);
-    }
+    ).verify().unwrap();
 
     eprintln!("All files validated!");
 }

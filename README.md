@@ -1,7 +1,6 @@
 # Bus Writer
 
-This Rust crate provides a generic single-reader, multi-writer, with support for callbacks for monitoring progress. You provide any type which implements `io::Read` as the source, and a collection of destinations which implement `io::Write`. Callbacks
-may be given to control the cancellation of the writes, and to monitor the progress of each destination.
+This Rust crate provides a generic single-reader, multi-writer, with support for callbacks for monitoring progress. It also provides a generic single-reader, multi-verifier so that you can verify the results using a similar technique. You provide any type which implements `io::Read` as the source, and a collection of destinations which implement `io::Write`. Callbacks may be given to control the cancellation of the writes & verifies, and to monitor the progress of each destination.
 
 ## Why
 
@@ -55,34 +54,36 @@ fn main() {
             acc
         });
 
-    let source = Cursor::new(&data);
+    let mut source = Cursor::new(&data);
 
     let files = ["a", "b", "c", "d", "e", "f", "g", "h"];
     let mut temp_files = [
-        File::create(files[0]).unwrap(),
-        File::create(files[1]).unwrap(),
-        File::create(files[2]).unwrap(),
-        File::create(files[3]).unwrap(),
-        File::create(files[4]).unwrap(),
-        File::create(files[5]).unwrap(),
-        File::create(files[6]).unwrap(),
-        File::create(files[7]).unwrap(),
+        fs::OpenOptions::new().read(true).write(true).create(true).open(files[0]).unwrap(),
+        fs::OpenOptions::new().read(true).write(true).create(true).open(files[1]).unwrap(),
+        fs::OpenOptions::new().read(true).write(true).create(true).open(files[2]).unwrap(),
+        fs::OpenOptions::new().read(true).write(true).create(true).open(files[3]).unwrap(),
+        fs::OpenOptions::new().read(true).write(true).create(true).open(files[4]).unwrap(),
+        fs::OpenOptions::new().read(true).write(true).create(true).open(files[5]).unwrap(),
+        fs::OpenOptions::new().read(true).write(true).create(true).open(files[6]).unwrap(),
+        fs::OpenOptions::new().read(true).write(true).create(true).open(files[7]).unwrap(),
     ];
-    
+
+    let mut errored = false;
     let result = BusWriter::new(
-        source,
+        &mut source,
         &mut temp_files,
         // Reports progress of each device so that callers may create their own progress bars
         // for each destination being written to, as seen in System76's Popsicle GTK UI.
         |event| match event {
-            BusMessage::Written { id, bytes_written } => {
+            BusWriterMessage::Written { id, bytes_written } => {
                 println!("{}: {} total bytes written", files[id], bytes_written);
             }
-            BusMessage::Completed { id } => {
+            BusWriterMessage::Completed { id } => {
                 println!("{}: Completed", files[id]);
             }
-            BusMessage::Errored { id, why } => {
+            BusWriterMessage::Errored { id, why } => {
                 println!("{} errored: {}", files[id], why);
+                errored = true;
             }
         },
         // Executed at certain points while writing to check if the process needs to be cancelled
@@ -92,16 +93,41 @@ fn main() {
     if let Err(why) = result {
         eprintln!("writing failed: {}", why);
         exit(1);
+    } else if errored {
+        eprintln!("an error occurred");
+        exit(1);
     }
 
     eprintln!("finished writing; validating files");
 
-    for file in &files {
-        for (a, b) in BufReader::new(File::open(file).unwrap()).bytes().zip(data.iter()) {
-            assert_eq!(a.unwrap(), *b);
-        }
+    let result = BusVerifier::new(
+        source,
+        &mut temp_files,
+        |event| match event {
+            BusVerifierMessage::Read { id, bytes_read } => {
+                println!("{}: {} bytes verified", files[id], bytes_read);
+            }
+            BusVerifierMessage::Valid { id } => {
+                println!("{}: Validated", files[id]);
+            }
+            BusVerifierMessage::Invalid { id } => {
+                println!("{}: Invalid", id);
+                errored = true;
+            }
+            BusVerifierMessage::Errored { id, why } => {
+                println!("{} errored while verifying: {}", files[id], why);
+                errored = true;
+            }
+        },
+        || false
+    ).verify();
 
-        let _ = fs::remove_file(file);
+    if let Err(why) = result {
+        eprintln!("writing failed: {}", why);
+        exit(1);
+    } else if errored {
+        eprintln!("Error occurred");
+        exit(1);
     }
 
     eprintln!("All files validated!");
