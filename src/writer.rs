@@ -173,7 +173,9 @@ impl<
                             if (self.kill)() {
                                 return Ok(());
                             }
-                            thread::sleep(Duration::from_millis(1));
+                            while Arc::strong_count(&share) != 1 {
+                                thread::sleep(Duration::from_millis(1));
+                            }
                         }
                     }
                 }

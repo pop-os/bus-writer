@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
-use super::BUCKET_SIZE;
+use super::{BUCKET_SIZE, CHUNK_SIZE};
 
 /// Messages received from the callbacks in the verifier.
 pub enum BusVerifierMessage {
@@ -86,7 +86,7 @@ impl<
                     // Take ownership of the Arc'd counter so that the strong count lives.
                     let _threads_alive = threads_alive;
 
-                    let mut buffer = [0u8; 16 * 1024];
+                    let mut buffer = [0u8; CHUNK_SIZE];
                     let mut total_read = 0;
                     while let Ok(bucket) = receiver.recv() {
                         let mut checked = 0;
@@ -95,9 +95,9 @@ impl<
                             match device.read(&mut buffer[..read_up_to]) {
                                 Ok(0) => {
                                     break Some(BusVerifierMessage::Invalid { id });
-                                } 
+                                }
                                 Ok(read) => {
-                                    if &buffer[..read] == &bucket[checked..checked+read] {
+                                    if buffer[..read] == bucket[checked..checked+read] {
                                         total_read += read;
                                         checked += read;
                                         let _ = progress.send(BusVerifierMessage::Read { id, bytes_read: total_read as u64 });
@@ -185,7 +185,9 @@ impl<
                             if (self.kill)() {
                                 return Ok(());
                             }
-                            thread::sleep(Duration::from_millis(1));
+                            while Arc::strong_count(&share) != 1 {
+                                thread::sleep(Duration::from_millis(1));
+                            }
                         }
                     }
                 }
