@@ -3,7 +3,8 @@ name = "bus_writer"
 version = "0.1.0"
 authors = ["Michael Aaron Murphy <michael@system76.com>"]
 description = "Single-reader, multi-writer & single-reader, multi-verifier; broadcasts reads to multiple writeable destinations in parallel"
-license = "LICENSE"
+license = "MIT"
+license-file = "LICENSE"
 readme = "README.md"
 repository = "https://github.com/pop-os/bus_writer"
 
