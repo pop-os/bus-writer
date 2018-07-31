@@ -2,7 +2,8 @@ use bus::Bus;
 use crossbeam::scope;
 use std::io;
 use std::sync::Arc;
-use std::sync::mpsc::channel;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, TryRecvError};
 use std::thread;
 use std::time::Duration;
 use super::{CHUNK_SIZE, BUCKET_SIZE};
@@ -28,7 +29,9 @@ pub struct BusWriter<'bucket, 'dest, F, K, R, W: 'dest> {
     source: R,
     destinations: &'dest mut [W],
     bucket: Option<&'bucket mut [u8]>,
-    buckets: usize
+    buckets: usize,
+    broadcast_wait: Duration,
+    receiver_wait: Duration,
 }
 
 impl<
@@ -45,7 +48,9 @@ impl<
             source,
             destinations,
             bucket: None,
-            buckets: 4
+            buckets: 4,
+            broadcast_wait: Duration::from_millis(1),
+            receiver_wait: Duration::from_millis(1),
         }
     }
 
@@ -63,6 +68,19 @@ impl<
         self
     }
 
+    /// Controls how much time the main thread should wait to re-attempt a broadcast when blocked.
+    pub fn broadcast_wait(mut self, broadcast_wait: Duration) -> Self {
+        self.broadcast_wait = broadcast_wait;
+        self
+    }
+
+    /// Controls how much time a receiving thread should wait when blocked.
+    pub fn receiver_wait(mut self, receiver_wait: Duration) -> Self {
+        self.receiver_wait = receiver_wait;
+        self
+    }
+
+    /// Writes the source to each destination in parallel
     pub fn write(mut self) -> io::Result<()> {
         scope(move |scope| {
             let destinations = self.destinations;
@@ -70,40 +88,55 @@ impl<
             let mut callback = self.callback;
 
             // Will be used to broadcast Arc'd buckets of data to each thread.
-            let mut bus: Bus<Arc<Box<[u8]>>> = Bus::new(self.buckets);
+            let mut bus: Bus<Arc<Box<[u8]>>> = Bus::new(self.buckets + 1);
             // The strong count for this will be used to know when all threads are finished.
             let threads_alive = Arc::new(());
             // A channel for pinging the monitoring thread of a completed bucket, or an error.
             let (progress_tx, progress_rx) = channel();
+            // Tracks the number of received messages, to know when the queue is full.
+            let received = Arc::new(AtomicUsize::new(1));
 
             // Set up the threads for flashing each device
             for (id, mut device) in destinations.into_iter().enumerate() {
                 let threads_alive = threads_alive.clone();
                 let mut receiver = bus.add_rx();
                 let progress = progress_tx.clone();
+                let received = received.clone();
+                let wait_time = self.receiver_wait;
 
                 scope.spawn(move || {
                     // Take ownership of the Arc'd counter so that the strong count lives.
                     let _threads_alive = threads_alive;
 
+
                     // Write to destination until all buckets have been written.
-                    while let Ok(bucket) = receiver.recv() {
-                        let mut written = 0;
-                        while written != bucket.len() {
-                            let end = bucket.len().min(written + CHUNK_SIZE);
-                            match device.write(&bucket[written..end]) {
-                                Ok(wrote) => {
-                                    written += wrote;
-                                    let _ = progress.send(WriteUpdate::WroteChunk(id, wrote as u64));
-                                }
-                                Err(why) => {
-                                    let _ = progress.send(WriteUpdate::Errored(id, why));
-                                    return;
+                    //
+                    // NOTE: bus performs 1ns waits when blocked on receiving. That consumes a
+                    // a lot of CPU, so we are going to change that to 1ms to give other theads
+                    // some time to finish writing their work.
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(bucket) => {
+                                received.fetch_add(1, Ordering::SeqCst);
+                                let mut written = 0;
+                                while written != bucket.len() {
+                                    let end = bucket.len().min(written + CHUNK_SIZE);
+                                    match device.write(&bucket[written..end]) {
+                                        Ok(wrote) => {
+                                            written += wrote;
+                                            let _ = progress.send(WriteUpdate::WroteChunk(id, wrote as u64));
+                                        }
+                                        Err(why) => {
+                                            let _ = progress.send(WriteUpdate::Errored(id, why));
+                                            return;
+                                        }
+                                    }
                                 }
                             }
+                            Err(TryRecvError::Empty) => thread::sleep(wait_time),
+                            Err(_) => break
                         }
                     }
-
                     let _ = progress.send(WriteUpdate::Finished(id));
                 });
             }
@@ -147,48 +180,17 @@ impl<
                 });
             }
 
-            // The user may want to use a bucket size different from our choosing,
-            // or even reuse an existing bucket they created earlier. Create our
-            // own bucket if no bucket is provided, else, take theirs.
-            let mut bucket;
-            let mut buffer = match self.bucket {
-                Some(bucket) => bucket,
-                None => {
-                    bucket = vec![0u8; BUCKET_SIZE];
-                    &mut bucket
-                }
-            };
-
-            // Read from the source, and broadcast each bucket to the receiving threads.
-            // Broadcasting automatically blocks when the buffer is maxed out.
-            loop {
-                if (self.kill)() {
-                    return Ok(());
-                }
-                match self.source.read(&mut buffer)? {
-                    0 => break,
-                    read => {
-                        let share = Arc::new(buffer[..read].to_owned().into_boxed_slice());
-                        while bus.try_broadcast(share.clone()).is_err() {
-                            if (self.kill)() {
-                                return Ok(());
-                            }
-                            while Arc::strong_count(&share) != 1 {
-                                thread::sleep(Duration::from_millis(1));
-                            }
-                        }
-                    }
-                }
-            }
-
-            drop(bus);
-
-            // Wait for all threads to quit before returning from this function
-            while Arc::strong_count(&threads_alive) > 1 {
-                thread::sleep(Duration::from_millis(1));
-            }
-
-            Ok(())
+            broadcast!(
+                bus,
+                received,
+                self.bucket,
+                self.buckets,
+                ndestinations,
+                self.source,
+                self.kill,
+                &threads_alive,
+                self.broadcast_wait
+            )
         })
     }
 }
