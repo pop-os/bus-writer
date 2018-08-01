@@ -57,7 +57,7 @@ impl<
     /// We default to initializing a 16 MiB bucket before writing. If that size
     /// is unacceptable for you, or you would simply like to reuse an existing
     /// vector as the bucket, you may provide that here.
-    pub fn with_bucket(mut self, bucket: &'bucket mut Vec<u8>) -> Self {
+    pub fn with_bucket(mut self, bucket: &'bucket mut [u8]) -> Self {
         self.bucket = Some(bucket);
         self
     }
